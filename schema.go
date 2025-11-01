@@ -107,7 +107,7 @@ func (api *API) createOpenAPI() (spec *openapi3.T, err error) {
 
 			// Handle request types.
 			if route.Models.Request.Type != nil {
-				name, schema, err := api.RegisterModel(route.Models.Request)
+				name, schema, err := api.RegisterModel("$", route.Models.Request)
 				if err != nil {
 					return spec, err
 				}
@@ -122,7 +122,7 @@ func (api *API) createOpenAPI() (spec *openapi3.T, err error) {
 
 			// Handle response types.
 			for status, model := range route.Models.Responses {
-				name, schema, err := api.RegisterModel(model)
+				name, schema, err := api.RegisterModel("$", model)
 				if err != nil {
 					return spec, err
 				}
@@ -258,7 +258,7 @@ func isMarkedAsDeprecated(comment string) bool {
 
 // RegisterModel allows a model to be registered manually so that additional configuration can be applied.
 // The schema returned can be modified as required.
-func (api *API) RegisterModel(model Model, opts ...ModelOpts) (name string, schema *openapi3.Schema, err error) {
+func (api *API) RegisterModel(chain string, model Model, opts ...ModelOpts) (name string, schema *openapi3.Schema, err error) {
 	// Get the name.
 	t := model.Type
 	name = api.getModelName(t)
@@ -283,7 +283,7 @@ func (api *API) RegisterModel(model Model, opts ...ModelOpts) (name string, sche
 	var elementSchema *openapi3.Schema
 	switch t.Kind() {
 	case reflect.Slice, reflect.Array:
-		elementName, elementSchema, err = api.RegisterModel(modelFromType(t.Elem()))
+		elementName, elementSchema, err = api.RegisterModel(chain+"."+name, modelFromType(t.Elem()))
 		if err != nil {
 			return name, schema, fmt.Errorf("error getting schema of slice element %v: %w", t.Elem(), err)
 		}
@@ -298,7 +298,9 @@ func (api *API) RegisterModel(model Model, opts ...ModelOpts) (name string, sche
 	case reflect.Bool:
 		schema = openapi3.NewBoolSchema()
 	case reflect.Pointer:
-		name, schema, err = api.RegisterModel(modelFromType(t.Elem()), WithNullable())
+		// We can't make the model itself nullable because it can lead to ambiguity if there are two things pointing to it with different nullability constraints.
+		//Instead, we need to define the model then wrap up the schema to be allOf nullable in the calling site
+		name, schema, err = api.RegisterModel(chain+"."+name, modelFromType(t.Elem()))
 	case reflect.Map:
 		// Check that the key is a string.
 		if t.Key().Kind() != reflect.String {
@@ -306,12 +308,16 @@ func (api *API) RegisterModel(model Model, opts ...ModelOpts) (name string, sche
 		}
 
 		// Get the element schema.
-		elementName, elementSchema, err = api.RegisterModel(modelFromType(t.Elem()))
+		elementName, elementSchema, err = api.RegisterModel(chain+"."+name, modelFromType(t.Elem()))
 		if err != nil {
 			return name, schema, fmt.Errorf("error getting schema of map value element %v: %w", t.Elem(), err)
 		}
 		schema = openapi3.NewObjectSchema().WithNullable()
-		schema.AdditionalProperties.Schema = getSchemaReferenceOrValue(elementName, elementSchema)
+		if t.Elem().Kind() == reflect.Ptr {
+			schema.AdditionalProperties.Schema = nullableAllOfRefs(getSchemaReferenceOrValue(elementName, elementSchema))
+		} else {
+			schema.AdditionalProperties.Schema = getSchemaReferenceOrValue(elementName, elementSchema)
+		}
 	case reflect.Struct:
 		schema = openapi3.NewObjectSchema()
 		if schema.Description, schema.Deprecated, err = api.getTypeComment(t.PkgPath(), t.Name()); err != nil {
@@ -335,7 +341,7 @@ func (api *API) RegisterModel(model Model, opts ...ModelOpts) (name string, sche
 			}
 			// If the model doesn't exist.
 			_, alreadyExists := api.models[api.getModelName(f.Type)]
-			fieldSchemaName, fieldSchema, err := api.RegisterModel(modelFromType(f.Type))
+			fieldSchemaName, fieldSchema, err := api.RegisterModel(chain+"."+name, modelFromType(f.Type))
 			if err != nil {
 				return name, schema, fmt.Errorf("error getting schema for type %q, field %q, failed to get schema for embedded type %q: %w", t, fieldName, f.Type, err)
 			}
@@ -349,7 +355,6 @@ func (api *API) RegisterModel(model Model, opts ...ModelOpts) (name string, sche
 				for name, ref := range fieldSchema.Properties {
 					schema.Properties[name] = ref
 				}
-				fmt.Printf("[vitineth/rest]: (anonymous) marking field as required %v / %v\n", fieldName, fieldSchema)
 				schema.Required = append(schema.Required, fieldSchema.Required...)
 				continue
 			}
@@ -359,11 +364,14 @@ func (api *API) RegisterModel(model Model, opts ...ModelOpts) (name string, sche
 					return name, schema, fmt.Errorf("failed to get comments for field %q in type %q: %w", fieldName, name, err)
 				}
 			}
-			schema.Properties[fieldName] = ref
 			isPtr := f.Type.Kind() == reflect.Pointer
+			if isPtr {
+				schema.Properties[fieldName] = nullableAllOfRefs(ref)
+			} else {
+				schema.Properties[fieldName] = ref
+			}
 			hasOmitEmptySet := slices.Contains(jsonTags, "omitempty")
 			if isFieldRequired(isPtr, hasOmitEmptySet) {
-				fmt.Printf("[vitineth/rest]: marking field as required %v / %v\n", isPtr, fieldName)
 				schema.Required = append(schema.Required, fieldName)
 			}
 		}
@@ -393,6 +401,20 @@ func (api *API) RegisterModel(model Model, opts ...ModelOpts) (name string, sche
 	}
 
 	return
+}
+
+func nullableAllOfRefs(refs ...*openapi3.SchemaRef) *openapi3.SchemaRef {
+	s := openapi3.NewSchema()
+	s.AllOf = refs
+	s.Nullable = true
+	return openapi3.NewSchemaRef("", s)
+}
+
+func nullSchema() *openapi3.Schema {
+	s := openapi3.NewSchema()
+	var t openapi3.Types = openapi3.Types([]string{openapi3.TypeNull})
+	s.Type = &t
+	return s
 }
 
 func (api *API) getCommentsForPackage(pkg string) (pkgComments map[string]string, err error) {
