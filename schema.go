@@ -326,6 +326,10 @@ func (api *API) RegisterModel(model Model, opts ...ModelOpts) (name string, sche
 			// Get JSON fieldName.
 			jsonTags := strings.Split(f.Tag.Get("json"), ",")
 			fieldName := jsonTags[0]
+			if fieldName == "-" {
+				// Respect the json convention of "-" meaning unexported
+				continue
+			}
 			if fieldName == "" {
 				fieldName = f.Name
 			}
@@ -345,6 +349,7 @@ func (api *API) RegisterModel(model Model, opts ...ModelOpts) (name string, sche
 				for name, ref := range fieldSchema.Properties {
 					schema.Properties[name] = ref
 				}
+				fmt.Printf("[vitineth/rest]: (anonymous) marking field as required %v / %v\n", fieldName, fieldSchema)
 				schema.Required = append(schema.Required, fieldSchema.Required...)
 				continue
 			}
@@ -358,6 +363,7 @@ func (api *API) RegisterModel(model Model, opts ...ModelOpts) (name string, sche
 			isPtr := f.Type.Kind() == reflect.Pointer
 			hasOmitEmptySet := slices.Contains(jsonTags, "omitempty")
 			if isFieldRequired(isPtr, hasOmitEmptySet) {
+				fmt.Printf("[vitineth/rest]: marking field as required %v / %v\n", isPtr, fieldName)
 				schema.Required = append(schema.Required, fieldName)
 			}
 		}
