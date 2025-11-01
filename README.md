@@ -1,5 +1,12 @@
 # REST
 
+> [!Note]
+> **Fork Info**
+> 
+> This fork makes the following changes
+> * Schema generation respects the `-` naming convention from json serialisation and will omit those fields from the generated structs
+> * Schemas aren't marked as nullable if they are pointers, instead references will be wrapped in an `allOf` with `nullable` combination to achieve the same effect. This fixes some issues with schema generation where fields flip between nullable and not due to non-deterministic generation order
+
 Document a REST API with an OpenAPI 3.0 specification.
 
 * Code, not configuration.
